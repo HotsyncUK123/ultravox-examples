@@ -38,98 +38,47 @@ function getCallDetails(ultravoxCallId: string): CallData | null {
 async function transferActiveCall(ultravoxCallId: string, destinationNumber: string, transferReason?: string): Promise<TransferResult> {
   const callData = activeCalls.get(ultravoxCallId);
   
-  if (!callData) {
+  if (!callData || !callData.providerCallSid) {
     throw new Error(`Call not found: ${ultravoxCallId}`);
   }
 
   try {
-    if (!callData.providerCallSid) {
-      throw new Error('Call not found or invalid Call SID');
-    }
-
-    // Initialize Twilio client
     const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-    const twiml = new twilio.twiml.VoiceResponse();
+    const fromNumber = process.env.TWILIO_PHONE_NUMBER;
+    const baseUrl = process.env.NGROK_URL; // This is your Render URL
+    const conferenceName = `conf_${ultravoxCallId}`;
 
-    // Do a whisper transfer
-    if (transferReason && transferReason != '') {
-        const fromNumber = process.env.TWILIO_PHONE_NUMBER;
-        const baseUrl = process.env.NGROK_URL || `http://localhost:${process.env.API_PORT}`;
+    // 1. Move the ORIGINAL CALLER into the conference room
+    // They will hear hold music until the agent joins.
+    await client.calls(callData.providerCallSid).update({
+      twiml: `
+        <Response>
+          <Dial>
+            <Conference waitUrl="http://twimlets.com/holdmusic/S_Classic">${conferenceName}</Conference>
+          </Dial>
+        </Response>`
+    });
 
-        if (!fromNumber) {
-            throw new Error('Required parameter "from" missing. No valid phone number found.');
-        }
-      
-        // Put call on hold so we can start a conference call
-        const holdTwiml = new twilio.twiml.VoiceResponse();
-        holdTwiml.play('http://com.twilio.music.classical.s3.amazonaws.com/BusyStrings.mp3');
+    // 2. Call the HUMAN AGENT
+    // We give them the reason and ask them to press 1 to join the conference.
+    await client.calls.create({
+      to: destinationNumber,
+      from: fromNumber!,
+      twiml: `
+        <Response>
+          <Gather numDigits="1" action="${baseUrl}/api/confirm-agent-transfer?confName=${conferenceName}" timeout="15">
+            <Say>Hello. You have a transfer request regarding: ${transferReason}. Press 1 to accept and connect to the caller.</Say>
+          </Gather>
+          <Say>I did not receive an input. Hanging up.</Say>
+          <Hangup/>
+        </Response>`
+    });
 
-        await client.calls(callData.providerCallSid)
-            .update({
-                twiml: holdTwiml.toString()
-            });
-
-        // Call human agent and deliver whisper message -- they need to press a key to connect
-        const conferenceName = `conf_${ultravoxCallId}_${Date.now()}`;
-
-        console.log('Starting whisper transfer for call:', callData.providerCallSid);
-        console.log('Conference name:', conferenceName);
-        console.log('Agent phone number:', destinationNumber);
-        console.log('Creating agent call...');
-        const agentCall = await client.calls.create({
-          to: destinationNumber,
-          from: fromNumber,
-          twiml: `
-              <Response>
-                  <Say voice="alice">
-                      ${transferReason}
-                  </Say>
-                  <Say voice="alice">Press any key to connect the caller.</Say>
-                  <Gather numDigits="1" action="${baseUrl}/connect-conference/${conferenceName}/${callData.providerCallSid}">
-                      <Say voice="alice">Press any key to connect.</Say>
-                  </Gather>
-              </Response>
-          `
-        });
-
-        console.log('Agent call created successfully:', {
-          agentCallSid: agentCall.sid,
-          to: destinationNumber,
-          from: fromNumber,
-          status: agentCall.status
-        });
-
-      return {
-        status: 'success',
-        message: 'Call transfer with text whisper initiated',
-        callDetails: {
-            ultravoxCallId: ultravoxCallId,
-            destinationNumber: destinationNumber,
-            transferInitiated: new Date()
-        }
-      }
-    }
-    // Do a regular transfer
-    else {
-        twiml.dial().number(destinationNumber);
-
-        // Update the active call with the new TwiML
-        await client.calls(callData.providerCallSid)
-        .update({
-            twiml: twiml.toString()
-        });
-
-        return {
-        status: 'success',
-        message: 'Call transfer initiated',
-        callDetails: {
-            ultravoxCallId,
-            providerCallSid: callData.providerCallSid,
-            destinationNumber,
-            transferInitiated: new Date()
-        }
-        };
-    }
+    return {
+      status: 'success',
+      message: 'Warm transfer initiated. Caller is on hold in conference.',
+      callDetails: { ultravoxCallId, destinationNumber, transferInitiated: new Date() }
+    };
 
   } catch (error) {
     console.error('Error transferring Twilio call:', error);
