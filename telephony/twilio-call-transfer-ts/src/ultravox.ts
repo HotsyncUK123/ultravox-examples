@@ -11,7 +11,19 @@ const SERVICE_API_KEY = process.env.SERVICE_API_KEY;
 
 // Ultravox configuration
 const ULTRAVOX_API_URL = 'https://api.ultravox.ai/api/calls';
-const SYSTEM_PROMPT = 'Your name is Steve and you are calling a person on the phone. Ask them their name and see how they are doing.';
+
+// --- UPDATED SYSTEM PROMPT ---
+const SYSTEM_PROMPT = `
+Your name is Steve, a professional AI assistant. 
+
+TRANSFER PROTOCOL:
+1. If the user asks for a human, a manager, or has a complex request, you must transfer them.
+2. Before triggering the tool, you MUST say: "I'll be happy to connect you with a specialist. Please stay on the line for a moment while I get them on the call."
+3. Then, call the "transferCall" tool.
+4. You must provide a clear "transferReason" (e.g., "Customer wants a refund" or "Billing inquiry").
+
+Be helpful, concise, and polite.
+`;
 
 const getAgentTools = (baseUrl: string): AgentTool[] => {
     if (!DESTINATION_PHONE_NUMBER || !SERVICE_API_KEY) {
@@ -22,7 +34,7 @@ const getAgentTools = (baseUrl: string): AgentTool[] => {
         {
             "temporaryTool": {
                 "modelToolName": "transferCall",
-                "description": "Transfers call to a human. Use this if a caller is upset or if there are questions you cannot answer.",
+                "description": "Transfers the call to a human agent. Use this when the user asks for a person or has a complex issue.",
                 "requirements": {
                     "httpSecurityOptions": {
                         "options": [
@@ -58,33 +70,33 @@ const getAgentTools = (baseUrl: string): AgentTool[] => {
                     }
                 ],
                 "dynamicParameters": [
-                {
-                    "name": "firstName",
-                    "location": "PARAMETER_LOCATION_BODY",
-                    "schema": {
-                    "description": "The caller's first name",
-                    "type": "string",
+                    {
+                        "name": "firstName",
+                        "location": "PARAMETER_LOCATION_BODY",
+                        "schema": {
+                            "description": "The caller's first name",
+                            "type": "string",
+                        },
+                        "required": false,
                     },
-                    "required": true,
-                },
-                {
-                    "name": "lastName",
-                    "location": "PARAMETER_LOCATION_BODY",
-                    "schema": {
-                        "description": "The caller's last name",
-                        "type": "string",
+                    {
+                        "name": "lastName",
+                        "location": "PARAMETER_LOCATION_BODY",
+                        "schema": {
+                            "description": "The caller's last name",
+                            "type": "string",
+                        },
+                        "required": false,
                     },
-                    "required": true,
-                },
-                {
-                    "name": "transferReason",
-                    "location": "PARAMETER_LOCATION_BODY",
-                    "schema": {
-                        "description": "The reason the call is being transferred.",
-                        "type": "string",
+                    {
+                        "name": "transferReason",
+                        "location": "PARAMETER_LOCATION_BODY",
+                        "schema": {
+                            "description": "A brief summary of why the call is being transferred.",
+                            "type": "string",
+                        },
+                        "required": true,
                     },
-                    "required": true,
-                },
                 ],
                 "http": {
                     "baseUrlPattern": `${baseUrl}/api/transfer`,
@@ -118,8 +130,6 @@ export async function createUltravoxCall(baseUrl: string): Promise<UltravoxRespo
 
     const callConfig = getUltravoxCallConfig(baseUrl);
     console.log('Creating Ultravox call with Twilio as medium...');
-    // Uncomment the line below to see full call configuration used for creating Ultravox call
-    //console.log('Call configuration:', JSON.stringify(callConfig, null, 2));
     
     const request = https.request(ULTRAVOX_API_URL, {
         method: 'POST',
@@ -140,35 +150,24 @@ export async function createUltravoxCall(baseUrl: string): Promise<UltravoxRespo
             });
             
             response.on('end', () => {
-                console.log('Complete response data:', data);
-                
                 try {
                     const parsedData = JSON.parse(data) as UltravoxResponse;
-                    
                     if (response.statusCode && response.statusCode >= 400) {
-                        console.error('ERROR: API request failed with status', response.statusCode);
-                        console.error('Error details:', JSON.stringify(parsedData, null, 2));
-                        reject(new Error(`API request failed with status ${response.statusCode}: ${JSON.stringify(parsedData)}`));
+                        reject(new Error(`API request failed: ${JSON.stringify(parsedData)}`));
                     } else {
-                        console.log('API request succeeded');
                         resolve(parsedData);
                     }
                 } catch (error) {
-                    console.error('Failed to parse response data. Raw response:', data);
-                    reject(new Error(`Failed to parse Ultravox response: ${(error as Error).message}. Raw response: ${data}`));
+                    reject(new Error(`Failed to parse response: ${data}`));
                 }
             });
         });
 
         request.on('error', (error: Error) => {
-            console.error('Network error during API call:', error.message);
             reject(error);
         });
 
-        const jsonPayload = JSON.stringify(callConfig);
-        console.log('Sending request payload:', jsonPayload);
-        
-        request.write(jsonPayload);
+        request.write(JSON.stringify(callConfig));
         request.end();
     });
 }
