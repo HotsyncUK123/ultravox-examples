@@ -11,7 +11,7 @@ const app = express();
 
 // Middleware
 app.use(express.json());
-// Crucial: Twilio sends data as URL-encoded form data for Gather actions
+// Twilio sends data as URL-encoded form data for Gather actions
 app.use(express.urlencoded({ extended: true })); 
 app.use(morgan('dev'));
 
@@ -34,6 +34,14 @@ const validateApiKey = (req: Request, res: Response, next: NextFunction): void =
 };
 
 // --- ROUTES ---
+
+/**
+ * ROOT ROUTE
+ * Added to prevent 404 errors when visiting the base URL
+ */
+app.get('/', (req: Request, res: Response) => {
+  res.send('Ultravox Transfer Service is Online.');
+});
 
 // Health Check
 app.get('/api/health', (req: Request, res: Response) => {
