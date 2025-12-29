@@ -1,6 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import morgan from 'morgan';
 import { Server } from 'http';
+import twilio from 'twilio';
 import { transferActiveCall, getCallDetails, activeCalls } from './callManager.js';
 import type { TransferRequest, ApiResponse, HealthResponse } from './types.js';
 import { router as webhookRoutes } from './webhooks.js';
@@ -10,6 +11,7 @@ const app = express();
 
 // Middleware
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // Added to handle Twilio's POST data
 app.use(morgan('dev'));
 
 let publicUrl: string | undefined;
@@ -20,14 +22,8 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   const timestamp = new Date().toISOString();
   console.log(`${timestamp} - ${req.method} ${req.url}`);
   
-  // Enhanced logging for webhook requests
-  if (req.url.includes('webhook') || req.url.includes('status') || req.url.includes('stream-events')) {
-    console.log(`🔔 Webhook detected: ${req.method} ${req.url}`);
-    console.log('Headers:', {
-      'user-agent': req.headers['user-agent'],
-      'content-type': req.headers['content-type'],
-      'x-twilio-signature': req.headers['x-twilio-signature'] ? 'Present' : 'Missing'
-    });
+  if (req.url.includes('webhook') || req.url.includes('status') || req.url.includes('stream-events') || req.url.includes('connect-conference')) {
+    console.log(`🔔 Twilio Webhook/Action detected: ${req.method} ${req.url}`);
   }
   
   next();
@@ -48,7 +44,9 @@ const validateApiKey = (req: Request, res: Response, next: NextFunction): void =
   next();
 };
 
-// Routes
+// --- ROUTES ---
+
+// Health Check
 app.get('/api/health', (req: Request, res: Response) => {
   const healthResponse: HealthResponse = { 
     status: 'ok', 
@@ -70,26 +68,13 @@ app.get('/api/health', (req: Request, res: Response) => {
 // Get call details
 app.get('/api/calls/:callId', validateApiKey, (req: Request, res: Response) => {
   const { callId } = req.params;
-
-  if (!callId) {
-    res.status(404).json({ 
-      status: 'error',
-      message: `CallId is required.`
-    } as ApiResponse);
-    return;
-  }
-
   const callDetails = getCallDetails(callId);
   
   if (!callDetails) {
-    res.status(404).json({ 
-      status: 'error',
-      message: `Call not found: ${callId}`
-    } as ApiResponse);
+    res.status(404).json({ status: 'error', message: `Call not found: ${callId}` } as ApiResponse);
     return;
   }
   
-  // Prepare a sanitized version of call details
   const sanitizedDetails = {
     ultravoxCallId: callId,
     provider: 'twilio',
@@ -98,89 +83,78 @@ app.get('/api/calls/:callId', validateApiKey, (req: Request, res: Response) => {
     startTime: callDetails.startTime
   };
   
-  res.json({
-    status: 'success',
-    data: sanitizedDetails
-  } as ApiResponse<typeof sanitizedDetails>);
+  res.json({ status: 'success', data: sanitizedDetails } as ApiResponse<typeof sanitizedDetails>);
 });
 
+// Debug Active Calls
 app.get('/api/debug/calls', validateApiKey, (req: Request, res: Response) => {
   try {
-    // Convert Map to array of objects for JSON response
-    const callsArray = Array.from(activeCalls.entries()).map(([ultravoxCallId, callData]) => {
-      return {
-        ultravoxCallId,
-        ...callData
-      };
-    });
+    const callsArray = Array.from(activeCalls.entries()).map(([ultravoxCallId, callData]) => ({
+      ultravoxCallId,
+      ...callData
+    }));
     
     res.json({
       status: 'success',
       timestamp: new Date(),
       activeCalls: callsArray,
       count: callsArray.length
-    } as ApiResponse<{ activeCalls: typeof callsArray; count: number; timestamp: Date }>);
-  } catch (error) {
-    console.error('Error in debug endpoint:', error);
-    res.status(500).json({
-      status: 'error',
-      message: (error as Error).message || 'Unknown error occurred'
     } as ApiResponse);
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: (error as Error).message } as ApiResponse);
   }
 });
 
-// Transfer call endpoint
+// Transfer call endpoint (Triggered by AI Tool)
 app.post('/api/transfer', validateApiKey, async (req: Request, res: Response) => {
   try {
-    const { ultravoxCallId, destinationNumber, firstName, lastName, transferReason, useWhisper }: TransferRequest = req.body;
-    console.log(`Incoming request to /api/transfer...`);
-    // Log additional fields if provided
-    if (firstName || lastName || transferReason) {
-      console.log('Transfer request details:');
-      if (firstName) console.log(`First Name: ${firstName}`);
-      if (lastName) console.log(`Last Name: ${lastName}`);
-      if (transferReason) console.log(`Transfer Reason: ${transferReason}`);
-      if (useWhisper) console.log(`Use Whisper Transfer: ${useWhisper}`);
-    }
+    const { ultravoxCallId, destinationNumber, transferReason, useWhisper }: TransferRequest = req.body;
 
-    // Validate input
     if (!ultravoxCallId || !destinationNumber) {
-      res.status(400).json({
-        status: 'error',
-        message: 'Missing required fields: ultravoxCallId and destinationNumber'
-      } as ApiResponse);
+      res.status(400).json({ status: 'error', message: 'Missing required fields' } as ApiResponse);
       return;
     }
     
-    // Validate phone number format
-    if (!/^\+[1-9]\d{1,14}$/.test(destinationNumber)) {
-      res.status(400).json({
-        status: 'error',
-        message: 'Invalid phone number format. Must be E.164 format (e.g., +15551234567)'
-      } as ApiResponse);
-      return;
-    }
+    const result = await transferActiveCall(ultravoxCallId, destinationNumber, transferReason);
     
-    // Attempt to transfer the call
-    let result;
-    if (useWhisper && useWhisper === true) {
-      result = await transferActiveCall(ultravoxCallId, destinationNumber, transferReason);
-    } else {
-      result = await transferActiveCall(ultravoxCallId, destinationNumber);
-    }
-    
-    res.json({
-      status: 'success',
-      data: result
-    } as ApiResponse<typeof result>);
-    
+    res.json({ status: 'success', data: result } as ApiResponse);
   } catch (error) {
     console.error('Transfer API error:', error);
-    const errorMessage = (error as Error).message;
-    res.status(errorMessage?.includes('not found') ? 404 : 500).json({
-      status: 'error',
-      message: errorMessage || 'Unknown error occurred'
-    } as ApiResponse);
+    res.status(500).json({ status: 'error', message: (error as Error).message } as ApiResponse);
+  }
+});
+
+/**
+ * WARM TRANSFER HANDSHAKE
+ * This endpoint is called when the human agent presses a key.
+ * It moves both the original caller and the agent into the conference room.
+ */
+app.post('/connect-conference/:conferenceName/:originalCallSid', async (req: Request, res: Response) => {
+  const { conferenceName, originalCallSid } = req.params;
+  const digits = req.body.Digits; // The key the agent pressed
+
+  console.log(`Agent pressed: ${digits}. Connecting parties to conference: ${conferenceName}`);
+  
+  try {
+    const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+
+    // 1. Move the original caller (who is currently hearing hold music) into the conference
+    await client.calls(originalCallSid).update({
+      twiml: `<Response><Dial><Conference>${conferenceName}</Conference></Dial></Response>`
+    });
+
+    // 2. Tell the Agent they are being connected and put them in the same conference
+    const twiml = new twilio.twiml.VoiceResponse();
+    twiml.say({ voice: 'alice' }, 'Connecting you now.');
+    twiml.dial().conference({
+      startConferenceOnEnter: true,
+      endConferenceOnExit: true 
+    }, conferenceName);
+
+    res.type('text/xml').send(twiml.toString());
+  } catch (error) {
+    console.error('Error connecting parties to conference:', error);
+    res.status(500).send('Error connecting call');
   }
 });
 
@@ -190,33 +164,22 @@ app.use('/', webhookRoutes);
 // Error handler
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   console.error('API Server Error:', err);
-  res.status(500).json({
-    status: 'error',
-    message: 'Internal Server Error'
-  } as ApiResponse);
+  res.status(500).json({ status: 'error', message: 'Internal Server Error' } as ApiResponse);
 });
 
 /**
  * Start the API server
- * @param port - Port to listen on
- * @param ngrokUrl - Ngrok URL (if used)
- * @returns The HTTP server instance 
  */
 async function startApiServer(port: number = 3000, ngrokUrl?: string): Promise<{ server: Server }> {
   publicUrl = ngrokUrl;
   baseUrl = ngrokUrl || `http://localhost:${port}`;
 
-  // Start the Express server
   const server = app.listen(port, () => {
     console.log(`API Server listening on port ${port}`);
     console.log(`Public URL: ${baseUrl}`);
-    console.log(`Twilio Status: ${baseUrl}/status`);
-    console.log(`Twilio Streams: ${baseUrl}/stream-events`);
   });
   
-  return {
-    server
-  };
+  return { server };
 }
 
 export { startApiServer };
